@@ -1,96 +1,107 @@
-#import <UIKit/UIKit.h>
-#import <Foundation/Foundation.h>
-#import <substrate.h>
+//
+//  Tweak.xm
+//  VolChangeTrack
+//
+//  Created by Mokhles Hussien & Timm Kandziora on 02.06.15.
+//  Copyright (c) 2015 Mokhles Hussien & Timm Kandziora. All rights reserved.
+//
+
+#import "VolChangeTrack.h"
 
 #define kPreferencesPath @"/User/Library/Preferences/com.imokhles.volchangetrack.plist"
 #define kPreferencesChanged "com.imokhles.volchangetrack.preferences-changed"
 
 #define kEnableTweak @"enableTweak"
 
-static BOOL changeTrackBOOL;
-NSTimer *timer;
+static BOOL volChangeTrackEnabled = YES;
 
-@interface VolumeControl : NSObject
-- (void)decreaseVolume;
-- (void)increaseVolume;
-@end
+static int lastButtonPressed; // Volume Down is -1, Volume Up is 1
+static float lastVolume;
+static NSTimeInterval lastTimePressed;
 
-
-@interface SBMediaController : NSObject
-+ (id)sharedInstance;
-- (_Bool)togglePlayPause;
-- (_Bool)changeTrack:(int)arg1;
-@end
-
-static void reloadChangeTrackPrefs() {
-	NSDictionary *tweakSettings = [NSDictionary dictionaryWithContentsOfFile:kPreferencesPath];
-
-	NSNumber *tweakEnabledKey = tweakSettings[kEnableTweak];
-    changeTrackBOOL = tweakEnabledKey ? [tweakEnabledKey boolValue] : 0;
+static void ResetVolume()
+{
+	[[objc_getClass("SBMediaController") sharedInstance] setVolume:lastVolume];
 }
 
-static void handleChangeTrackUpdate() {
-	reloadChangeTrackPrefs();
-}
-
-static void changeTrackSBInit() {
-	[[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *block) {
-		CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, (CFNotificationCallback)handleChangeTrackUpdate, CFSTR(kPreferencesChanged), NULL, 0);
-		handleChangeTrackUpdate();
- 
-     }];
-}
-
-static void changeTrack(int trackNumber, id target) {
-	[[objc_getClass("SBMediaController") sharedInstance] changeTrack:trackNumber];
-}
-
-static void toggleTrack() {
+static void ToggleTrack()
+{
+	ResetVolume();
 	[[objc_getClass("SBMediaController") sharedInstance] togglePlayPause];
 }
 
-%hook SpringBoard
-- (id)init {
-	SpringBoard *SB = %orig;
-	changeTrackSBInit();
-	return SB;
+static void ChangeTrack(int trackNumber)
+{
+	ResetVolume();
+	[[objc_getClass("SBMediaController") sharedInstance] changeTrack:trackNumber];
 }
-- (void)_lockButtonDown:(id)arg1 fromSource:(int)arg2 {
-	if (changeTrackBOOL) {
-		toggleTrack();
-	} else {
-		%orig;
-	}
-}
-- (void)_lockButtonUp:(id)arg1 fromSource:(int)arg2  {
-	if (changeTrackBOOL) {
-		return;
-	} else {
-		%orig;
-	}
-}
-%end
 
 %hook VolumeControl
 
-- (void)increaseVolume {
-	if (changeTrackBOOL) {
-		changeTrack(1, self);
-	} else {
-		%orig;
+/*
+
+BUG: Holding volume up/down now changes tracks fast instead of continuously turning volume up/down
+POSSIBLE FIX: Check the time stamps; if the time between the time stamps is really low then maybe the bug above occured
+
+*/
+
+- (void)increaseVolume
+{
+	if (volChangeTrackEnabled) {
+		if (lastButtonPressed == 1) {
+			if (lastTimePressed + 300 >= [[NSDate date] timeIntervalSince1970] * 1000  && [self _isMusicPlayingSomewhere]) {
+				lastTimePressed = [[NSDate date] timeIntervalSince1970] * 1000;
+				ChangeTrack(1);
+				return;
+			}
+		} else if (lastButtonPressed == -1) {
+			if (lastTimePressed + 300 >= [[NSDate date] timeIntervalSince1970] * 1000) {
+				lastTimePressed = [[NSDate date] timeIntervalSince1970] * 1000;
+				ToggleTrack();
+				return;
+			}
+		}
+
+		lastButtonPressed = 1;
+		lastTimePressed = [[NSDate date] timeIntervalSince1970] * 1000;
 	}
+
+	lastVolume = [self getMediaVolume];
+
+	%orig();
 }
 
-- (void)decreaseVolume {
-	if (changeTrackBOOL) {
-		changeTrack(-1, self);
-	} else {
-		%orig;
+- (void)decreaseVolume
+{
+	if (volChangeTrackEnabled) {
+		if (lastButtonPressed == -1) {
+			if (lastTimePressed + 300 >= [[NSDate date] timeIntervalSince1970] * 1000  && [self _isMusicPlayingSomewhere]) {
+				lastTimePressed = [[NSDate date] timeIntervalSince1970] * 1000;
+				ChangeTrack(-1);
+				return;
+			}
+		} else if (lastButtonPressed == 1) {
+			if (lastTimePressed + 300 >= [[NSDate date] timeIntervalSince1970] * 1000) {
+				lastTimePressed = [[NSDate date] timeIntervalSince1970] * 1000;
+				ToggleTrack();
+				return;
+			}
+		}
+
+		lastButtonPressed = -1;
+		lastTimePressed = [[NSDate date] timeIntervalSince1970] * 1000;
 	}
+
+	lastVolume = [self getMediaVolume];
+
+	%orig();
 }
+
+/*
 // supports ( Activator )
-- (void)_changeVolumeBy:(CGFloat)arg1 {
-	if (changeTrackBOOL) {
+- (void)_changeVolumeBy:(CGFloat)arg1
+{
+	if (volChangeTrackEnabled) {
 		if (arg1 > 0) {
 			[self increaseVolume];
 		} else {
@@ -100,4 +111,26 @@ static void toggleTrack() {
 		%orig;
 	}
 }
+*/
+
 %end
+
+static void ReloadSettings()
+{
+	NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kPreferencesPath];
+
+	if (settings) {
+		if ([settings objectForKey:kEnableTweak]) {
+			volChangeTrackEnabled = [[settings objectForKey:kEnableTweak] boolValue];
+		}
+	}
+
+	[settings release];
+}
+
+%ctor {
+	@autoreleasepool {
+		ReloadSettings();
+		CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, (CFNotificationCallback)ReloadSettings, CFSTR(kPreferencesChanged), NULL, CFNotificationSuspensionBehaviorCoalesce);
+	}
+}
